@@ -56,9 +56,20 @@ jobs:
         run: |
           kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | \
             kubectl apply -f -
+
+          # enforce alone leaves warn/audit at restricted, so admission still grades
+          # every privileged pod against restricted:latest and logs violations it is
+          # not acting on. Set all three. The sync opt-out keeps OpenShift's label
+          # synchronisation controller from recomputing warn/audit from SCC grants,
+          # which it would otherwise do before this chart's RBAC exists.
           kubectl label namespace "$NAMESPACE" \
+            security.openshift.io/scc.podSecurityLabelSync=false \
             pod-security.kubernetes.io/enforce=privileged \
+            pod-security.kubernetes.io/warn=privileged \
+            pod-security.kubernetes.io/audit=privileged \
             --overwrite
+
+          kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.labels}' | tr ',' '\n'
 
       - name: Install chart (base, no GFD)
         run: |
