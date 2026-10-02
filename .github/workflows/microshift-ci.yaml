@@ -380,6 +380,62 @@ jobs:
             grep -q 'security.openshift.io' && echo "OK: SCC rule still in namespaced Role" || \
             { echo "FAIL: SCC rule missing from namespaced Role"; exit 1; }
 
+      - name: Verify SCC RoleBinding binds an existing NFD worker ServiceAccount
+        run: |
+          BINDING="${RELEASE}-scc-role-binding"
+
+          echo "--- SCC RoleBinding subjects ---"
+          kubectl get rolebinding "$BINDING" -n "$NAMESPACE" \
+            -o jsonpath='{range .subjects[*]}{.kind}/{.name}{"\n"}{end}'
+
+          WORKER_SA=$(kubectl get rolebinding "$BINDING" -n "$NAMESPACE" \
+            -o jsonpath='{range .subjects[?(@.kind=="ServiceAccount")]}{.name}{"\n"}{end}' \
+            | grep -- '-worker$' || true)
+
+          if [ -z "$WORKER_SA" ]; then
+            echo "FAIL: SCC RoleBinding does not bind an NFD worker ServiceAccount"
+            exit 1
+          fi
+          echo "RoleBinding references ServiceAccount: $WORKER_SA"
+
+          # RBAC accepts subjects that do not exist, so the binding alone proves nothing.
+          if ! kubectl get serviceaccount "$WORKER_SA" -n "$NAMESPACE" >/dev/null 2>&1; then
+            echo "FAIL: ServiceAccount '$WORKER_SA' does not exist - binding is a no-op"
+            echo "--- ServiceAccounts actually present ---"
+            kubectl get serviceaccount -n "$NAMESPACE" -o name
+            exit 1
+          fi
+          echo "OK: bound ServiceAccount exists"
+
+      - name: Verify NFD worker pod runs with privileged SCC
+        run: |
+          # nfd-worker pods carry the subchart selector labels plus role=worker.
+          WORKER_SELECTOR='app.kubernetes.io/name=node-feature-discovery,role=worker'
+
+          kubectl wait --for=condition=Ready pod -n "$NAMESPACE" \
+            -l "$WORKER_SELECTOR" --timeout=180s || true
+
+          POD=$(kubectl get pods -n "$NAMESPACE" -l "$WORKER_SELECTOR" \
+            -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+          if [ -z "$POD" ]; then
+            echo "FAIL: no nfd-worker pod found"
+            kubectl get pods -n "$NAMESPACE" --show-labels
+            exit 1
+          fi
+
+          SCC=$(kubectl get pod "$POD" -n "$NAMESPACE" \
+            -o jsonpath='{.metadata.annotations.openshift\.io/scc}')
+          PHASE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}')
+          echo "nfd-worker pod: $POD  phase=$PHASE  scc=$SCC"
+
+          if [ "$SCC" != "privileged" ]; then
+            echo "FAIL: expected nfd-worker SCC 'privileged', got '$SCC'"
+            kubectl describe pod "$POD" -n "$NAMESPACE"
+            exit 1
+          fi
+          echo "OK: nfd-worker running with privileged SCC"
+
       - name: Wait for DaemonSet rollout
         run: |
           kubectl rollout status daemonset -n "$NAMESPACE" \
