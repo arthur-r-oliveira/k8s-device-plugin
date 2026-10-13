@@ -52,6 +52,15 @@ jobs:
             helm uninstall "$release" -n "$NAMESPACE" --wait || true
           done
 
+          # Sweep leftover CUDA application-test pods from prior CI/manual runs.
+          # Current jobs use test-cuda-workload; older names still appear on the runner.
+          echo "--- Cleaning leftover CUDA test pods ---"
+          for ns in "$NAMESPACE" test; do
+            kubectl get pods -n "$ns" -o name 2>/dev/null | \
+              grep -E 'pod/test-cuda' | \
+              xargs -r -n1 kubectl delete -n "$ns" --ignore-not-found --wait=false || true
+          done
+
       - name: Create namespace with PSS labels
         run: |
           kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | \
@@ -201,7 +210,7 @@ jobs:
             { echo "FAIL: CUDA vectorAdd did not pass"; exit 1; }
           echo "OK: CUDA workload completed successfully"
 
-          kubectl delete pod test-cuda-workload -n "$NAMESPACE"
+          kubectl delete pod test-cuda-workload -n "$NAMESPACE" --ignore-not-found --wait=true
 
       - name: Collect logs on failure
         if: failure()
@@ -338,7 +347,7 @@ jobs:
             { echo "FAIL: CUDA vectorAdd did not pass"; exit 1; }
           echo "OK: CUDA workload completed successfully"
 
-          kubectl delete pod test-cuda-workload -n "$NAMESPACE"
+          kubectl delete pod test-cuda-workload -n "$NAMESPACE" --ignore-not-found --wait=true
 
       - name: Collect logs on failure
         if: failure()
@@ -537,7 +546,7 @@ jobs:
             { echo "FAIL: CUDA vectorAdd did not pass"; exit 1; }
           echo "OK: CUDA workload completed successfully"
 
-          kubectl delete pod test-cuda-workload -n "$NAMESPACE"
+          kubectl delete pod test-cuda-workload -n "$NAMESPACE" --ignore-not-found --wait=true
 
       - name: Collect logs on failure
         if: failure()
@@ -553,3 +562,27 @@ jobs:
           kubectl logs test-cuda-workload -n "$NAMESPACE" 2>/dev/null || true
           echo "=== Events ==="
           kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' || true
+
+  microshift-cleanup:
+    name: Cleanup leftover test resources
+    runs-on: [self-hosted, microshift]
+    needs: microshift-gfd
+    if: always()
+    env:
+      NAMESPACE: nvidia-device-plugin
+    steps:
+      - name: Delete CUDA test pods and uninstall chart
+        run: |
+          for ns in "$NAMESPACE" test; do
+            kubectl get pods -n "$ns" -o name 2>/dev/null | \
+              grep -E 'pod/test-cuda' | \
+              xargs -r -n1 kubectl delete -n "$ns" --ignore-not-found --wait=false || true
+          done
+
+          for release in $(helm list -n "$NAMESPACE" -q 2>/dev/null); do
+            echo "Removing release: $release"
+            helm uninstall "$release" -n "$NAMESPACE" --wait || true
+          done
+
+          echo "--- Remaining pods in $NAMESPACE ---"
+          kubectl get pods -n "$NAMESPACE" || true
