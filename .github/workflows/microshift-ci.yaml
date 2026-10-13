@@ -73,28 +73,44 @@ jobs:
 
       - name: Install chart (base, no GFD)
         run: |
+          set -o pipefail
           helm install "$RELEASE" "$HELM_CHART" \
             --namespace "$NAMESPACE" \
             --set compatWithCPUManager=true \
             --wait \
-            --timeout 120s
+            --timeout 120s 2>&1 | tee /tmp/helm-base-install.log
 
-      - name: Verify no ClusterRole without GFD
+          # warn/audit must be privileged (set above); otherwise admission still
+          # grades privileged DaemonSets against restricted:latest.
+          if grep -q 'would violate PodSecurity "restricted:latest"' /tmp/helm-base-install.log; then
+            echo "FAIL: helm install emitted PodSecurity restricted:latest warnings"
+            exit 1
+          fi
+          echo "OK: no PodSecurity restricted:latest warnings during install"
+
+      - name: Verify ClusterRole on base install
         run: |
-          echo "--- ClusterRole (should NOT exist) ---"
-          if kubectl get clusterrole -l app.kubernetes.io/instance="$RELEASE" 2>/dev/null | grep -q nvidia; then
-            echo "FAIL: ClusterRole should not exist without gfd.enabled"
-            kubectl get clusterrole -l app.kubernetes.io/instance="$RELEASE" -o yaml
-            exit 1
-          fi
-          echo "OK: no ClusterRole created"
+          echo "--- ClusterRole (always created; nodes only, no NFD/SCC) ---"
+          kubectl get clusterrole -l app.kubernetes.io/instance="$RELEASE" -o yaml | \
+            grep -q 'nodes' && echo "OK: ClusterRole has node rules" || \
+            { echo "FAIL: ClusterRole missing or no node rules"; exit 1; }
 
-          echo "--- ClusterRoleBinding (should NOT exist) ---"
-          if kubectl get clusterrolebinding -l app.kubernetes.io/instance="$RELEASE" 2>/dev/null | grep -q nvidia; then
-            echo "FAIL: ClusterRoleBinding should not exist without gfd.enabled"
+          if kubectl get clusterrole -l app.kubernetes.io/instance="$RELEASE" -o yaml | grep -q 'nfd.k8s-sigs.io'; then
+            echo "FAIL: NFD rules should not be in ClusterRole without GFD"
             exit 1
           fi
-          echo "OK: no ClusterRoleBinding created"
+          echo "OK: no NFD rules in ClusterRole"
+
+          if kubectl get clusterrole -l app.kubernetes.io/instance="$RELEASE" -o yaml | grep -q 'security.openshift.io'; then
+            echo "FAIL: SCC rule should not be in ClusterRole"
+            exit 1
+          fi
+          echo "OK: SCC rule not in ClusterRole"
+
+          echo "--- ClusterRoleBinding ---"
+          kubectl get clusterrolebinding -l app.kubernetes.io/instance="$RELEASE" -o yaml | \
+            grep -q 'kind: ClusterRole' && echo "OK: ClusterRoleBinding exists" || \
+            { echo "FAIL: ClusterRoleBinding missing"; exit 1; }
 
       - name: Verify namespaced SCC Role
         run: |
